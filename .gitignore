@@ -10,10 +10,6 @@ nukkit-loader/build
 nukkit-loader/build/*
 dependency-reduced-pom.xml
 
-carrot.yml
-
-recipes.json
-
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/
 
