@@ -8,9 +8,6 @@ import cn.nukkit.event.player.PlayerFoodLevelChangeEvent;
 import cn.nukkit.item.food.Food;
 import cn.nukkit.potion.Effect;
 
-/**
- * Created by funcraft on 2015/11/11.
- */
 public class PlayerFood
 {
 
