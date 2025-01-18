@@ -9,6 +9,10 @@ nukkit-core/build/*
 nukkit-loader/build
 nukkit-loader/build/*
 dependency-reduced-pom.xml
+.gradle
+.gradle/*
+bin
+bin/*
 
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/
