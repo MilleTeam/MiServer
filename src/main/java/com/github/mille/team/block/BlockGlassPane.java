@@ -1,0 +1,50 @@
+package com.github.mille.team.block;
+
+import com.github.mille.team.item.Item;
+import com.github.mille.team.utils.BlockColor;
+
+/**
+ * Created on 2015/12/6 by xtypr. Package com.github.mille.team.block in project Nukkit .
+ */
+public class BlockGlassPane extends BlockThin {
+
+    public BlockGlassPane() {
+        this(0);
+    }
+
+    public BlockGlassPane(int meta) {
+        super(0);
+    }
+
+
+    @Override
+    public String getName() {
+        return "Glass Pane";
+    }
+
+    @Override
+    public int getId() {
+        return GLASS_PANE;
+    }
+
+    @Override
+    public double getResistance() {
+        return 1.5;
+    }
+
+    @Override
+    public double getHardness() {
+        return 0.3;
+    }
+
+    @Override
+    public Item[] getDrops(Item item) {
+        return new Item[0];
+    }
+
+    @Override
+    public BlockColor getColor() {
+        return BlockColor.AIR_BLOCK_COLOR;
+    }
+
+}

@@ -1,1 +1,1 @@
-rootProject.name = "Carrot"
+rootProject.name = "MiServer"

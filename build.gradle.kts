@@ -1,4 +1,3 @@
-import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import com.github.jengelman.gradle.plugins.shadow.transformers.Log4j2PluginsCacheFileTransformer
 
 plugins {
@@ -11,8 +10,8 @@ repositories {
     mavenCentral()
 }
 
-group = "cn.nukkit"
-version = "1.0-SNAPSHOT"
+group = "com.github.mille.team"
+version = "1.0.0"
 
 dependencies {
     implementation ("org.fusesource.jansi:jansi:2.4.1")

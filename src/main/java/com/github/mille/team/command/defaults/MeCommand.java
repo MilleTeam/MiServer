@@ -1,0 +1,60 @@
+package com.github.mille.team.command.defaults;
+
+import com.github.mille.team.Player;
+import com.github.mille.team.command.CommandSender;
+import com.github.mille.team.command.data.CommandParameter;
+import com.github.mille.team.lang.TranslationContainer;
+import com.github.mille.team.utils.TextFormat;
+
+/**
+ * Created on 2015/11/12 by xtypr. Package com.github.mille.team.command.defaults in project Nukkit .
+ */
+public class MeCommand extends VanillaCommand {
+
+    public MeCommand(String name) {
+        super(name, "%nukkit.command.me.description", "%commands.me.usage");
+        this.setPermission("nukkit.command.me");
+        this.commandParameters.clear();
+        this.commandParameters.put("default", new CommandParameter[]{
+            new CommandParameter("action ...", CommandParameter.ARG_TYPE_RAW_TEXT, false)
+        });
+    }
+
+    @Override
+    public boolean execute(
+        CommandSender sender,
+        String commandLabel,
+        String[] args
+    ) {
+        if (!this.testPermission(sender)) {
+            return true;
+        }
+
+        if (args.length == 0) {
+            sender.sendMessage(new TranslationContainer("commands.generic.usage", this.usageMessage));
+
+            return false;
+        }
+
+        String name;
+        if (sender instanceof Player) {
+            name = ((Player) sender).getDisplayName();
+        } else {
+            name = sender.getName();
+        }
+
+        String msg = "";
+        for (String arg : args) {
+            msg += arg + " ";
+        }
+
+        if (msg.length() > 0) {
+            msg = msg.substring(0, msg.length() - 1);
+        }
+
+        sender.getServer().broadcastMessage(new TranslationContainer("chat.type.emote", new String[]{name, TextFormat.WHITE + msg}));
+
+        return true;
+    }
+
+}

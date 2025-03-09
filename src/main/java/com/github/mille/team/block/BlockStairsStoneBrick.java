@@ -1,0 +1,43 @@
+package com.github.mille.team.block;
+
+import com.github.mille.team.item.ItemTool;
+
+/**
+ * Created on 2015/11/25 by xtypr. Package com.github.mille.team.block in project Nukkit .
+ */
+public class BlockStairsStoneBrick extends BlockStairs {
+
+    public BlockStairsStoneBrick() {
+        this(0);
+    }
+
+    public BlockStairsStoneBrick(int meta) {
+        super(meta);
+    }
+
+    @Override
+    public int getId() {
+        return STONE_BRICK_STAIRS;
+    }
+
+    @Override
+    public int getToolType() {
+        return ItemTool.TYPE_PICKAXE;
+    }
+
+    @Override
+    public double getHardness() {
+        return 1.5;
+    }
+
+    @Override
+    public double getResistance() {
+        return 30;
+    }
+
+    @Override
+    public String getName() {
+        return "Stone Brick Stairs";
+    }
+
+}
