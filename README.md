@@ -1,6 +1,6 @@
 # MiServer
 
-A server software for Minecraft: Pocket Edition written in Java
+A server software for Minecraft: Pocket Edition 1.1.X written in Java
 
 ## A note about the project
  - This project is still in development and is not yet ready for production use.
