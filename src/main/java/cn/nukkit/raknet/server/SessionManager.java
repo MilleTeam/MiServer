@@ -186,13 +186,14 @@ public class SessionManager implements AutoCloseable
 		});
 
 		// Check IP security limits and block if necessary
-		ipSec.entrySet().removeIf(entry -> {
-			if (entry.getValue().get() >= this.packetLimit) {
-				this.blockAddress(entry.getKey());
-				return true;
+		for (String address : new ArrayList<>(this.ipSec.keySet())) {
+			int count = this.ipSec.get(address).get();
+			if (count >= this.packetLimit) {
+				this.blockAddress(address);
 			}
-			return false;
-		});
+		}
+		// Clear packet counters every tick to match original behavior
+		this.ipSec.clear();
 
 		long currentTicks = ticks.incrementAndGet();
 		if ((currentTicks & 0b1111) == 0)
