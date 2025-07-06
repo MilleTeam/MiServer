@@ -59,6 +59,8 @@ public class SessionManager implements AutoCloseable
 	protected volatile long lastMeasure;
 
 	protected volatile String currentSource = "";
+	
+	protected final RakNetMetrics metrics = new RakNetMetrics();
 
 	public SessionManager(
 		RakNetServer server,
@@ -78,12 +80,22 @@ public class SessionManager implements AutoCloseable
 	public void close()
 	{
 		shutdown.set(true);
+		
+		// Close UDP socket first
+		if (socket != null) {
+			try {
+				socket.close();
+			} catch (Exception e) {
+				getLogger().warning("Error closing UDP socket", e);
+			}
+		}
+		
 		// Close all sessions
 		sessions.values().forEach(session -> {
 			try {
 				session.close();
 			} catch (Exception e) {
-				getLogger().error("Error closing session", e);
+				getLogger().warning("Error closing session", e);
 			}
 		});
 		sessions.clear();
@@ -99,6 +111,13 @@ public class SessionManager implements AutoCloseable
 	public ThreadedLogger getLogger()
 	{
 		return this.server.getLogger();
+	}
+	
+	/**
+	 * Get performance metrics for this session manager.
+	 */
+	public RakNetMetrics getMetrics() {
+		return metrics;
 	}
 
 	public void run() throws Exception
@@ -131,6 +150,7 @@ public class SessionManager implements AutoCloseable
 					}
 					// Log error but continue processing
 					getLogger().debug("Error processing packet from " + currentSource, e);
+					metrics.recordError();
 				}
 			}
 			while (this.receiveStream() && !shutdown.get()) ;
@@ -182,6 +202,15 @@ public class SessionManager implements AutoCloseable
 				this.sendBytes.getAndSet(0) / diff + ";" + 
 				this.receiveBytes.getAndSet(0) / diff);
 			this.lastMeasure = time;
+			
+			// Update metrics
+			metrics.setActiveSessions(sessions.size());
+			metrics.setBlockedAddresses(block.size());
+			
+			// Log metrics summary every 16 ticks (roughly every second)
+			if ((currentTicks & 0b11111111) == 0) {
+				getLogger().debug(metrics.getSummary());
+			}
 
 			if (!this.block.isEmpty())
 			{
@@ -234,6 +263,7 @@ public class SessionManager implements AutoCloseable
 				int port = datagramPacket.sender().getPort();
 
 				this.receiveBytes.addAndGet(len);
+				metrics.recordPacketReceived(len);
 
 				byte pid = buffer[0];
 
@@ -284,7 +314,9 @@ public class SessionManager implements AutoCloseable
 	) throws IOException
 	{
 		packet.encode();
-		this.sendBytes.addAndGet(this.socket.writePacket(packet.buffer, dest, port));
+		int sent = this.socket.writePacket(packet.buffer, dest, port);
+		this.sendBytes.addAndGet(sent);
+		metrics.recordPacketSent(sent);
 	}
 
 	public void sendPacket(
@@ -293,7 +325,9 @@ public class SessionManager implements AutoCloseable
 	) throws IOException
 	{
 		packet.encode();
-		this.sendBytes.addAndGet(this.socket.writePacket(packet.buffer, dest));
+		int sent = this.socket.writePacket(packet.buffer, dest);
+		this.sendBytes.addAndGet(sent);
+		metrics.recordPacketSent(sent);
 	}
 
 	public void streamEncapsulated(
