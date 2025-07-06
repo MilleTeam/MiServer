@@ -54,6 +54,15 @@ public class RakNetInterface implements ServerInstance, AdvancedSourceInterface
 
 		this.raknet = new RakNetServer(this.server.getLogger(), this.server.getPort(), this.server.getIp().equals("") ? "0.0.0.0" : this.server.getIp());
 		this.handler = new ServerHandler(this.raknet, this);
+		
+		// Register shutdown hook
+		Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+			try {
+				raknet.close();
+			} catch (Exception e) {
+				server.getLogger().logException(e);
+			}
+		}));
 	}
 
 	@Override
@@ -127,13 +136,23 @@ public class RakNetInterface implements ServerInstance, AdvancedSourceInterface
 	@Override
 	public void shutdown()
 	{
-		this.handler.shutdown();
+		try {
+			this.handler.shutdown();
+			this.raknet.close();
+		} catch (Exception e) {
+			server.getLogger().logException(e);
+		}
 	}
 
 	@Override
 	public void emergencyShutdown()
 	{
-		this.handler.emergencyShutdown();
+		try {
+			this.handler.emergencyShutdown();
+			this.raknet.close();
+		} catch (Exception e) {
+			server.getLogger().logException(e);
+		}
 	}
 
 	@Override

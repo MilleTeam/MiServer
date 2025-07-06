@@ -4,11 +4,17 @@ import cn.nukkit.Server;
 import cn.nukkit.utils.ThreadedLogger;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * author: MagicDroidX Nukkit Project
+ * Modern RakNet server implementation using ExecutorService instead of Thread inheritance.
+ * 
+ * @author MagicDroidX Nukkit Project
  */
-public class RakNetServer extends Thread
+public class RakNetServer implements AutoCloseable
 {
 
 	protected final int port;
@@ -21,7 +27,9 @@ public class RakNetServer extends Thread
 
 	protected ConcurrentLinkedQueue<byte[]> internalQueue;
 
-	protected boolean shutdown;
+	protected final AtomicBoolean shutdown = new AtomicBoolean(false);
+	
+	protected final ExecutorService executorService;
 
 
 	public RakNetServer(
@@ -49,18 +57,38 @@ public class RakNetServer extends Thread
 
 		this.externalQueue = new ConcurrentLinkedQueue<>();
 		this.internalQueue = new ConcurrentLinkedQueue<>();
+		this.executorService = Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "RakNet-Server-" + port);
+			t.setDaemon(true);
+			return t;
+		});
 
 		this.start();
 	}
 
 	public boolean isShutdown()
 	{
-		return shutdown;
+		return shutdown.get();
 	}
 
 	public void shutdown()
 	{
-		this.shutdown = true;
+		this.shutdown.set(true);
+	}
+
+	@Override
+	public void close()
+	{
+		shutdown();
+		executorService.shutdown();
+		try {
+			if (!executorService.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+				executorService.shutdownNow();
+			}
+		} catch (InterruptedException e) {
+			executorService.shutdownNow();
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	public int getPort()
@@ -108,33 +136,28 @@ public class RakNetServer extends Thread
 		return this.externalQueue.poll();
 	}
 
-	@Override
-	public void run()
+	public CompletableFuture<Void> start()
 	{
-		this.setName("RakNet Thread #" + Thread.currentThread().getId());
-		Runtime.getRuntime().addShutdownHook(new ShutdownHandler());
-		UDPServerSocket socket = new UDPServerSocket(this.getLogger(), port, this.interfaz);
-		try
-		{
+		return CompletableFuture.runAsync(this::run, executorService);
+	}
+
+	protected void run()
+	{
+		try {
+			logger.info("Starting RakNet server on " + interfaz + ":" + port);
+			UDPServerSocket socket = new UDPServerSocket(this.getLogger(), port, this.interfaz);
 			new SessionManager(this, socket);
 		}
 		catch (Exception e)
 		{
-			Server.getInstance().getLogger().logException(e);
-		}
-	}
-
-	private class ShutdownHandler extends Thread
-	{
-
-		public void run()
-		{
-			if (!shutdown)
-			{
-				logger.emergency("RakNet crashed!");
+			logger.error("RakNet server error", e);
+			if (Server.getInstance() != null) {
+				Server.getInstance().getLogger().logException(e);
 			}
 		}
-
+		finally {
+			logger.info("RakNet server stopped");
+		}
 	}
 
 }
