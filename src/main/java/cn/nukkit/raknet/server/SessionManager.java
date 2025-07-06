@@ -14,11 +14,18 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * author: MagicDroidX Nukkit Project
+ * Modernized SessionManager with improved concurrency and performance.
+ * 
+ * @author MagicDroidX Nukkit Project
  */
-public class SessionManager
+public class SessionManager implements AutoCloseable
 {
 
 	public final long serverId;
@@ -29,29 +36,31 @@ public class SessionManager
 
 	protected final UDPServerSocket socket;
 
-	protected final Map<String, Session> sessions = new HashMap<>();
+	protected final ConcurrentMap<String, Session> sessions = new ConcurrentHashMap<>();
 
-	protected final Map<String, Long> block = new HashMap<>();
+	protected final ConcurrentMap<String, Long> block = new ConcurrentHashMap<>();
 
-	protected final Map<String, Integer> ipSec = new HashMap<>();
+	protected final ConcurrentMap<String, AtomicInteger> ipSec = new ConcurrentHashMap<>();
 
-	public boolean portChecking = true;
+	public volatile boolean portChecking = true;
 
-	protected int receiveBytes = 0;
+	protected final AtomicInteger receiveBytes = new AtomicInteger(0);
 
-	protected int sendBytes = 0;
+	protected final AtomicInteger sendBytes = new AtomicInteger(0);
 
-	protected String name = "";
+	protected volatile String name = "";
 
-	protected int packetLimit = 1000;
+	protected volatile int packetLimit = 1000;
 
-	protected boolean shutdown = false;
+	protected final AtomicBoolean shutdown = new AtomicBoolean(false);
 
-	protected long ticks = 0;
+	protected final AtomicLong ticks = new AtomicLong(0);
 
-	protected long lastMeasure;
+	protected volatile long lastMeasure;
 
-	protected String currentSource = "";
+	protected volatile String currentSource = "";
+	
+	protected final RakNetMetrics metrics = new RakNetMetrics();
 
 	public SessionManager(
 		RakNetServer server,
@@ -67,6 +76,33 @@ public class SessionManager
 		this.run();
 	}
 
+	@Override
+	public void close()
+	{
+		shutdown.set(true);
+		
+		// Close UDP socket first
+		if (socket != null) {
+			try {
+				socket.close();
+			} catch (Exception e) {
+				getLogger().warning("Error closing UDP socket", e);
+			}
+		}
+		
+		// Close all sessions
+		sessions.values().forEach(session -> {
+			try {
+				session.close();
+			} catch (Exception e) {
+				getLogger().warning("Error closing session", e);
+			}
+		});
+		sessions.clear();
+		block.clear();
+		ipSec.clear();
+	}
+
 	public int getPort()
 	{
 		return this.server.port;
@@ -75,6 +111,13 @@ public class SessionManager
 	public ThreadedLogger getLogger()
 	{
 		return this.server.getLogger();
+	}
+	
+	/**
+	 * Get performance metrics for this session manager.
+	 */
+	public RakNetMetrics getMetrics() {
+		return metrics;
 	}
 
 	public void run() throws Exception
@@ -85,11 +128,11 @@ public class SessionManager
 	private void tickProcessor() throws Exception
 	{
 		this.lastMeasure = System.currentTimeMillis();
-		while (!this.shutdown)
+		while (!this.shutdown.get())
 		{
 			long start = System.currentTimeMillis();
 			int max = 5000;
-			while (max > 0)
+			while (max > 0 && !shutdown.get())
 			{
 				try
 				{
@@ -105,10 +148,12 @@ public class SessionManager
 					{
 						this.blockAddress(currentSource);
 					}
-					// else ignore
+					// Log error but continue processing
+					getLogger().debug("Error processing packet from " + currentSource, e);
+					metrics.recordError();
 				}
 			}
-			while (this.receiveStream()) ;
+			while (this.receiveStream() && !shutdown.get()) ;
 
 			long time = System.currentTimeMillis() - start;
 			if (time < 50)
@@ -119,7 +164,8 @@ public class SessionManager
 				}
 				catch (InterruptedException e)
 				{
-					//ignore
+					Thread.currentThread().interrupt();
+					break;
 				}
 			}
 			this.tick();
@@ -129,28 +175,43 @@ public class SessionManager
 	private void tick() throws Exception
 	{
 		long time = System.currentTimeMillis();
-		for (Session session : new ArrayList<>(this.sessions.values()))
-		{
-			session.update(time);
-		}
+		
+		// Update sessions - use concurrent iteration to avoid blocking
+		sessions.values().parallelStream().forEach(session -> {
+			try {
+				session.update(time);
+			} catch (Exception e) {
+				getLogger().debug("Error updating session", e);
+			}
+		});
 
-		for (String address : this.ipSec.keySet())
-		{
-			int count = this.ipSec.get(address);
-			if (count >= this.packetLimit)
-			{
+		// Check IP security limits and block if necessary
+		for (String address : new ArrayList<>(this.ipSec.keySet())) {
+			int count = this.ipSec.get(address).get();
+			if (count >= this.packetLimit) {
 				this.blockAddress(address);
 			}
 		}
+		// Clear packet counters every tick to match original behavior
 		this.ipSec.clear();
 
-		if ((this.ticks & 0b1111) == 0)
+		long currentTicks = ticks.incrementAndGet();
+		if ((currentTicks & 0b1111) == 0)
 		{
 			double diff = Math.max(5d, (double) time - this.lastMeasure);
-			this.streamOption("bandwidth", this.sendBytes / diff + ";" + this.receiveBytes / diff);
+			this.streamOption("bandwidth", 
+				this.sendBytes.getAndSet(0) / diff + ";" + 
+				this.receiveBytes.getAndSet(0) / diff);
 			this.lastMeasure = time;
-			this.sendBytes = 0;
-			this.receiveBytes = 0;
+			
+			// Update metrics
+			metrics.setActiveSessions(sessions.size());
+			metrics.setBlockedAddresses(block.size());
+			
+			// Log metrics summary every 16 ticks (roughly every second)
+			if ((currentTicks & 0b11111111) == 0) {
+				getLogger().debug(metrics.getSummary());
+			}
 
 			if (!this.block.isEmpty())
 			{
@@ -170,7 +231,7 @@ public class SessionManager
 			}
 		}
 
-		++this.ticks;
+		// Increment tick counter (already done above with ticks.incrementAndGet())
 	}
 
 	private boolean receivePacket() throws Exception
@@ -188,13 +249,8 @@ public class SessionManager
 					return true;
 				}
 
-				if (this.ipSec.containsKey(source))
-				{
-					this.ipSec.put(source, this.ipSec.get(source) + 1);
-				} else
-				{
-					this.ipSec.put(source, 1);
-				}
+				// Increment packet counter for this IP address
+				this.ipSec.computeIfAbsent(source, k -> new AtomicInteger(0)).incrementAndGet();
 
 				ByteBuf byteBuf = datagramPacket.content();
 				if (byteBuf.readableBytes() == 0)
@@ -207,7 +263,8 @@ public class SessionManager
 				int len = buffer.length;
 				int port = datagramPacket.sender().getPort();
 
-				this.receiveBytes += len;
+				this.receiveBytes.addAndGet(len);
+				metrics.recordPacketReceived(len);
 
 				byte pid = buffer[0];
 
@@ -258,7 +315,9 @@ public class SessionManager
 	) throws IOException
 	{
 		packet.encode();
-		this.sendBytes += this.socket.writePacket(packet.buffer, dest, port);
+		int sent = this.socket.writePacket(packet.buffer, dest, port);
+		this.sendBytes.addAndGet(sent);
+		metrics.recordPacketSent(sent);
 	}
 
 	public void sendPacket(
@@ -267,7 +326,9 @@ public class SessionManager
 	) throws IOException
 	{
 		packet.encode();
-		this.sendBytes += this.socket.writePacket(packet.buffer, dest);
+		int sent = this.socket.writePacket(packet.buffer, dest);
+		this.sendBytes.addAndGet(sent);
+		metrics.recordPacketSent(sent);
 	}
 
 	public void streamEncapsulated(
@@ -494,10 +555,10 @@ public class SessionManager
 					}
 
 					this.socket.close();
-					this.shutdown = true;
+					this.shutdown.set(true);
 					break;
 				case RakNet.PACKET_EMERGENCY_SHUTDOWN:
-					this.shutdown = true;
+					this.shutdown.set(true);
 				default:
 					return false;
 			}

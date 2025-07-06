@@ -122,24 +122,16 @@ public class ServerHandler
 	{
 		this.server.pushMainToThreadPacket(new byte[] { RakNet.PACKET_SHUTDOWN });
 		this.server.shutdown();
-		synchronized (this)
-		{
-			try
-			{
-				this.wait(20);
+		
+		// Wait for graceful shutdown with timeout
+		long startTime = System.currentTimeMillis();
+		while (!this.server.isShutdown() && (System.currentTimeMillis() - startTime) < 5000) {
+			try {
+				Thread.sleep(10);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				break;
 			}
-			catch (InterruptedException e)
-			{
-				//ignore
-			}
-		}
-		try
-		{
-			this.server.join();
-		}
-		catch (InterruptedException e)
-		{
-			//ignore
 		}
 	}
 
