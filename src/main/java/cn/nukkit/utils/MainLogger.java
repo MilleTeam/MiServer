@@ -3,6 +3,8 @@ package cn.nukkit.utils;
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 import lombok.extern.log4j.Log4j2;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * author: MagicDroidX Nukkit
@@ -14,6 +16,7 @@ We need to keep this class for backwards compatibility
 @NoArgsConstructor (access = AccessLevel.PRIVATE)
 public class MainLogger extends ThreadedLogger
 {
+	private static final Logger log = LogManager.getLogger(MainLogger.class);
 
 	private static final MainLogger logger = new MainLogger();
 

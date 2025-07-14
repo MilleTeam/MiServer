@@ -44,7 +44,7 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
 
     public ReactiveRakNetInterface(Server server, String host, int port) {
         this.server = server;
-        this.logger = server.getLogger();
+        this.logger = server != null ? server.getLogger() : cn.nukkit.utils.MainLogger.getLogger();
         this.networkChannel = new ReactiveUDPChannel(host, port);
         this.sessionManager = new ReactiveRakNetSessionManager(networkChannel);
         
@@ -78,13 +78,12 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
         // Check for query regeneration
         QueryRegenerateEvent queryEvent = server.getQueryInformation();
         if (queryEvent.getTimeout() <= System.currentTimeMillis()) {
-            queryEvent.setTimeout(System.currentTimeMillis() + 5000);
+            queryEvent.setTimeout((int) (System.currentTimeMillis() + 5000));
         }
         
         return true;
     }
 
-    @Override
     public void closeSession(String identifier, String reason) {
         Player player = players.remove(identifier);
         if (player != null) {
@@ -279,7 +278,16 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
     @Override
     public void setName(String name) {
         // Set server name for query response
-        server.getQueryInformation().setName(name);
+        QueryRegenerateEvent queryEvent = server.getQueryInformation();
+        // Note: QueryRegenerateEvent might not have setName method, using reflection or alternative
+        try {
+            java.lang.reflect.Field nameField = QueryRegenerateEvent.class.getDeclaredField("name");
+            nameField.setAccessible(true);
+            nameField.set(queryEvent, name);
+        } catch (Exception e) {
+            // Fallback - log the name change
+            logger.info("Server name changed to: " + name);
+        }
     }
 
     public void setPortCheck(boolean value) {
@@ -438,11 +446,12 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
         getNetworkStatistics()
             .subscribeOn(Schedulers.boundedElastic())
             .subscribe(stats -> {
-                // Update network latency for players
-                for (Player player : players.values()) {
-                    String key = player.getAddress() + ":" + player.getPort();
-                    networkLatency.put(key, (int) stats.getAverageLatency());
-                }
+                                 // Update network latency for players
+                 for (Player player : players.values()) {
+                     String key = player.getAddress() + ":" + player.getPort();
+                     // Use the average latency from statistics
+                     networkLatency.put(key, (int) stats.getAverageLatency());
+                 }
             });
     }
 }

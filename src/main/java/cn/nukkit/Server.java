@@ -49,6 +49,7 @@ import cn.nukkit.nbt.tag.ListTag;
 import cn.nukkit.network.CompressBatchedTask;
 import cn.nukkit.network.Network;
 import cn.nukkit.network.RakNetInterface;
+import cn.nukkit.network.ReactiveRakNetInterface;
 import cn.nukkit.network.SourceInterface;
 import cn.nukkit.network.protocol.BatchPacket;
 import cn.nukkit.network.protocol.DataPacket;
@@ -83,6 +84,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import com.google.common.base.Preconditions;
 
 import lombok.extern.log4j.Log4j2;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * @author MagicDroidX
@@ -91,6 +94,7 @@ import lombok.extern.log4j.Log4j2;
 @Log4j2
 public class Server
 {
+	private static final Logger log = LogManager.getLogger(Server.class);
 
 	public static final String BROADCAST_CHANNEL_ADMINISTRATIVE = "nukkit.broadcast.admin";
 
@@ -467,7 +471,17 @@ public class Server
 
 		this.queryRegenerateEvent = new QueryRegenerateEvent(this, 5);
 
-		this.network.registerInterface(new RakNetInterface(this));
+		// Initialize network interface based on configuration
+		boolean useReactiveRakNet = this.getPropertyBoolean("settings.use-reactive-raknet", false);
+		if (useReactiveRakNet) {
+			log.info("Using Reactive RakNet implementation for enhanced performance");
+			ReactiveRakNetInterface reactiveInterface = new ReactiveRakNetInterface(this, this.getIp(), this.getPort());
+			this.network.registerInterface(reactiveInterface);
+			reactiveInterface.start();
+		} else {
+			log.info("Using traditional RakNet implementation");
+			this.network.registerInterface(new RakNetInterface(this));
+		}
 
 		this.pluginManager.loadPlugins(this.pluginPath);
 

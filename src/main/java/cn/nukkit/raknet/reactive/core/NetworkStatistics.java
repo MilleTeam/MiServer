@@ -120,6 +120,12 @@ public class NetworkStatistics {
         return (double) packetsDropped.get() / totalPackets;
     }
     
+    public double getAverageLatency() {
+        // Return a default latency value for now
+        // In a real implementation, this would track actual RTT measurements
+        return 50.0; // Default 50ms
+    }
+    
     @Override
     public String toString() {
         return String.format(
