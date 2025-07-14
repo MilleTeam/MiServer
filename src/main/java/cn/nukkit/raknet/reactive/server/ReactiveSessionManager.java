@@ -205,22 +205,28 @@ public interface ReactiveSessionManager {
      * Session event data
      */
     class SessionEvent {
-        private final SessionEventType type;
+        private final EventType type;
+        private final String sessionId;
         private final ReactiveSession session;
         private final String reason;
 
-        public SessionEvent(SessionEventType type, ReactiveSession session) {
-            this(type, session, null);
+        public SessionEvent(EventType type, String sessionId, ReactiveSession session) {
+            this(type, sessionId, session, null);
         }
 
-        public SessionEvent(SessionEventType type, ReactiveSession session, String reason) {
+        public SessionEvent(EventType type, String sessionId, ReactiveSession session, String reason) {
             this.type = type;
+            this.sessionId = sessionId;
             this.session = session;
             this.reason = reason;
         }
 
-        public SessionEventType getType() {
+        public EventType getType() {
             return type;
+        }
+
+        public String getSessionId() {
+            return sessionId;
         }
 
         public ReactiveSession getSession() {
@@ -233,8 +239,18 @@ public interface ReactiveSessionManager {
 
         @Override
         public String toString() {
-            return String.format("SessionEvent{type=%s, session=%s, reason=%s}", 
-                               type, session.getId(), reason);
+            return String.format("SessionEvent{type=%s, sessionId=%s, reason=%s}", 
+                               type, sessionId, reason);
+        }
+
+        /**
+         * Session event types
+         */
+        public enum EventType {
+            SESSION_CREATED,
+            SESSION_CONNECTED,
+            SESSION_CLOSED,
+            SESSION_TIMEOUT
         }
     }
 }

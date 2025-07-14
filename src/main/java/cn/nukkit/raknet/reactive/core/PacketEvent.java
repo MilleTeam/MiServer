@@ -28,6 +28,10 @@ public class PacketEvent {
         return sender;
     }
     
+    public InetSocketAddress getSource() {
+        return sender;
+    }
+    
     public Instant getTimestamp() {
         return timestamp;
     }

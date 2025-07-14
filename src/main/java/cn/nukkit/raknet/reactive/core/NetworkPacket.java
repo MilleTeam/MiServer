@@ -16,6 +16,8 @@ public class NetworkPacket {
     private final Map<String, Object> metadata;
     private final int priority;
     private final boolean reliable;
+    private final long sequenceNumber;
+    private final long timestamp;
     
     public NetworkPacket(ByteBuf data, PacketType type) {
         this(data, type, 0, false);
@@ -26,6 +28,18 @@ public class NetworkPacket {
         this.type = type;
         this.priority = priority;
         this.reliable = reliable;
+        this.sequenceNumber = 0;
+        this.timestamp = System.currentTimeMillis();
+        this.metadata = new HashMap<>();
+    }
+    
+    public NetworkPacket(ByteBuf data, PacketType type, long sequenceNumber, long timestamp) {
+        this.data = data.retain();
+        this.type = type;
+        this.priority = 0;
+        this.reliable = false;
+        this.sequenceNumber = sequenceNumber;
+        this.timestamp = timestamp;
         this.metadata = new HashMap<>();
     }
     
@@ -45,6 +59,14 @@ public class NetworkPacket {
         return reliable;
     }
     
+    public long getSequenceNumber() {
+        return sequenceNumber;
+    }
+    
+    public long getTimestamp() {
+        return timestamp;
+    }
+    
     public Map<String, Object> getMetadata() {
         return metadata;
     }
@@ -53,9 +75,9 @@ public class NetworkPacket {
         metadata.put(key, value);
     }
     
+    @SuppressWarnings("unchecked")
     public <T> T getMetadata(String key, Class<T> type) {
-        Object value = metadata.get(key);
-        return type.isInstance(value) ? type.cast(value) : null;
+        return (T) metadata.get(key);
     }
     
     public int getDataLength() {
@@ -64,7 +86,7 @@ public class NetworkPacket {
     
     public byte[] getDataArray() {
         byte[] array = new byte[data.readableBytes()];
-        data.slice().readBytes(array);
+        data.getBytes(data.readerIndex(), array);
         return array;
     }
     
@@ -78,11 +100,14 @@ public class NetworkPacket {
     
     @Override
     public String toString() {
-        return String.format("NetworkPacket{type=%s, priority=%d, reliable=%s, dataLength=%d}", 
-                           type, priority, reliable, getDataLength());
+        return "NetworkPacket{type=" + type + ", priority=" + priority + ", reliable=" + reliable + ", length=" + getDataLength() + "}";
     }
     
     public enum PacketType {
+        PING,
+        PONG,
+        DATA,
+        CONTROL,
         RAKNET_PING,
         RAKNET_PONG,
         RAKNET_OPEN_CONNECTION_REQUEST_1,

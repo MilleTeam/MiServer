@@ -111,54 +111,54 @@ public class ReactiveRakNetSessionManager implements ReactiveSessionManager {
     @Override
     public Mono<ReactiveSession> createSession(InetSocketAddress address, long clientId) {
         return Mono.fromCallable(() -> {
-            if (!isRunning.get()) {
-                throw new IllegalStateException("Session manager is not running");
-            }
-            
-            // Check if we've reached max players
-            if (getOnlinePlayers() >= maxPlayers.get()) {
-                serverStatistics.incrementRejectedConnections();
-                throw new RuntimeException("Server is full");
-            }
-            
-            // Check if session already exists for this address
-            String existingSessionId = addressToSessionId.get(address);
-            if (existingSessionId != null) {
-                ReactiveSession existingSession = sessions.get(existingSessionId);
-                if (existingSession != null && existingSession.getState() != ReactiveSession.SessionState.DISCONNECTED) {
-                    return existingSession;
-                }
-            }
-            
-            // Generate session ID
-            String sessionId = UUID.randomUUID().toString();
-            
-            // Create new session
+            String sessionId = generateSessionId();
             ReactiveRakNetSession session = new ReactiveRakNetSession(
-                sessionId, address, clientId, networkChannel, sessionTimeout
+                sessionId,
+                address,
+                clientId,
+                networkChannel,
+                sessionTimeout
             );
             
-            // Store session
             sessions.put(sessionId, session);
             addressToSessionId.put(address, sessionId);
             
-            // Update statistics
-            serverStatistics.incrementTotalConnections();
-            
-            // Subscribe to session events
-            session.inbound()
-                .doOnNext(event -> {
-                    inboundSink.tryEmitNext(event);
-                    serverStatistics.addPacketsProcessed(1);
-                    serverStatistics.addBytesProcessed(event.getPacket().getDataLength());
-                })
-                .doOnError(error -> serverStatistics.incrementTotalErrors())
-                .subscribe();
+            // Session is ready to use
+            // serverStatistics.incrementSessionsCreated();
             
             // Emit session created event
-            sessionEventSink.tryEmitNext(new SessionEvent(SessionEventType.SESSION_CREATED, session));
+            SessionEvent event = new SessionEvent(SessionEvent.EventType.SESSION_CREATED, sessionId, session);
+            sessionEventSink.tryEmitNext(event);
             
-            return session;
+            return (ReactiveSession) session;
+        })
+        .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * Creates a new session with a specific identifier
+     */
+    public Mono<ReactiveSession> createSession(String identifier, InetSocketAddress address, long clientId) {
+        return Mono.fromCallable(() -> {
+            ReactiveRakNetSession session = new ReactiveRakNetSession(
+                identifier,
+                address,
+                clientId,
+                networkChannel,
+                sessionTimeout
+            );
+            
+            sessions.put(identifier, session);
+            addressToSessionId.put(address, identifier);
+            
+            // Session is ready to use
+            // serverStatistics.incrementSessionsCreated();
+            
+            // Emit session created event
+            SessionEvent event = new SessionEvent(SessionEvent.EventType.SESSION_CREATED, identifier, session);
+            sessionEventSink.tryEmitNext(event);
+            
+            return (ReactiveSession) session;
         })
         .subscribeOn(Schedulers.boundedElastic());
     }
@@ -195,7 +195,7 @@ public class ReactiveRakNetSessionManager implements ReactiveSessionManager {
                 serverStatistics.incrementTotalDisconnections();
                 
                 // Emit session disconnected event
-                sessionEventSink.tryEmitNext(new SessionEvent(SessionEventType.SESSION_DISCONNECTED, session));
+                sessionEventSink.tryEmitNext(new SessionEvent(SessionEvent.EventType.SESSION_CLOSED, sessionId, session));
             }
         })
         .subscribeOn(Schedulers.boundedElastic())
@@ -300,6 +300,46 @@ public class ReactiveRakNetSessionManager implements ReactiveSessionManager {
         .then();
     }
 
+    /**
+     * Handles incoming packets for a specific session
+     */
+    public Mono<Void> handleIncomingPacket(String sessionId, NetworkPacket packet) {
+        return getSession(sessionId)
+            .flatMap(session -> {
+                // Create a PacketEvent from the NetworkPacket
+                PacketEvent event = new PacketEvent(packet, session.getAddress(), packet.getSequenceNumber());
+                return session.handlePacket(event);
+            })
+            .switchIfEmpty(Mono.empty());
+    }
+
+    /**
+     * Processes session updates
+     */
+    public Mono<Void> processSessionUpdates() {
+        return Mono.fromRunnable(() -> {
+            // Update statistics
+            updateStatistics();
+            
+            // Clean up timed out sessions
+            cleanupTimedOutSessions().subscribe();
+        });
+    }
+
+    /**
+     * Shutdown the session manager
+     */
+    public Mono<Void> shutdown() {
+        return stop();
+    }
+
+    /**
+     * Gets server statistics
+     */
+    public Mono<ServerStatistics> getStatistics() {
+        return getServerStatistics();
+    }
+
     @Override
     public boolean isRunning() {
         return isRunning.get();
@@ -321,7 +361,7 @@ public class ReactiveRakNetSessionManager implements ReactiveSessionManager {
             .filterWhen(ReactiveSession::isTimedOut)
             .flatMap(session -> {
                 serverStatistics.incrementTimeoutDisconnections();
-                sessionEventSink.tryEmitNext(new SessionEvent(SessionEventType.SESSION_TIMEOUT, session, "Session timed out"));
+                sessionEventSink.tryEmitNext(new SessionEvent(SessionEvent.EventType.SESSION_TIMEOUT, session.getId(), session, "Session timed out"));
                 return removeSession(session.getId());
             })
             .then()
@@ -370,5 +410,9 @@ public class ReactiveRakNetSessionManager implements ReactiveSessionManager {
         if (sessionCount > 0) {
             serverStatistics.setAverageSessionDuration(totalDuration / sessionCount);
         }
+    }
+
+    private String generateSessionId() {
+        return UUID.randomUUID().toString();
     }
 }

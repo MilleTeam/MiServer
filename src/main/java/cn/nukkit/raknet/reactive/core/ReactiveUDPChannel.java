@@ -1,7 +1,10 @@
 package cn.nukkit.raknet.reactive.core;
 
+import cn.nukkit.raknet.reactive.core.NetworkPacket;
+import cn.nukkit.raknet.reactive.core.PacketEvent;
+import cn.nukkit.raknet.reactive.core.ReactiveNetworkChannel;
+import cn.nukkit.raknet.reactive.core.NetworkStatistics;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.socket.DatagramPacket;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -9,7 +12,7 @@ import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 import reactor.netty.udp.UdpClient;
 import reactor.netty.udp.UdpServer;
-import reactor.util.retry.Retry;
+import reactor.netty.Connection;
 
 import java.net.InetSocketAddress;
 import java.time.Duration;
@@ -18,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Concrete implementation of ReactiveNetworkChannel using Reactor Netty for UDP operations.
+ * Reactive UDP channel implementation using Reactor Netty
  */
 public class ReactiveUDPChannel implements ReactiveNetworkChannel {
 
@@ -30,9 +33,9 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
     private final Sinks.Many<PacketEvent> inboundSink;
     private final Flux<PacketEvent> inboundFlux;
     
-    private UdpServer server;
+    private Connection serverConnection;
     private UdpClient client;
-    
+
     public ReactiveUDPChannel(String host, int port) {
         this.bindAddress = new InetSocketAddress(host, port);
         this.statistics = new NetworkStatistics();
@@ -40,9 +43,7 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
         this.sequenceNumber = new AtomicLong(0);
         this.isRunning = new AtomicBoolean(false);
         this.inboundSink = Sinks.many().multicast().onBackpressureBuffer();
-        this.inboundFlux = inboundSink.asFlux()
-            .subscribeOn(Schedulers.boundedElastic())
-            .publishOn(Schedulers.parallel());
+        this.inboundFlux = inboundSink.asFlux();
     }
 
     @Override
@@ -52,30 +53,32 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
 
     @Override
     public Mono<Void> send(NetworkPacket packet, InetSocketAddress address) {
-        return Mono.fromCallable(() -> {
-            if (!isRunning.get()) {
-                throw new IllegalStateException("Channel is not running");
+        return Mono.fromRunnable(() -> {
+            if (isBlocked(address).block()) {
+                statistics.incrementPacketsDropped();
+                return;
             }
-            return packet;
+            statistics.incrementPacketsSent();
         })
-        .flatMap(p -> isBlocked(address)
-            .filter(blocked -> !blocked)
-            .switchIfEmpty(Mono.error(new RuntimeException("Address is blocked: " + address)))
-            .then(Mono.fromCallable(() -> {
-                ByteBuf buffer = p.getData();
-                DatagramPacket datagramPacket = new DatagramPacket(buffer, address);
-                
-                statistics.incrementPacketsSent();
-                statistics.addBytesSent(buffer.readableBytes());
+        .then(
+            Mono.fromCallable(() -> {
+                DatagramPacket datagramPacket = new DatagramPacket(
+                    packet.getData().copy(),
+                    address
+                );
                 
                 return datagramPacket;
             }))
-        )
         .flatMap(datagramPacket -> {
             if (client == null) {
                 client = UdpClient.create();
             }
-            return client.send(Mono.just(datagramPacket));
+            return client.connect()
+                .flatMap(connection -> 
+                    connection.outbound()
+                        .sendObject(Mono.just(datagramPacket))
+                        .then()
+                );
         })
         .then()
         .doOnError(error -> {
@@ -87,57 +90,47 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
     public Mono<Void> sendWithRetry(NetworkPacket packet, InetSocketAddress address, 
                                   int maxRetries, Duration retryDelay) {
         return send(packet, address)
-            .retryWhen(Retry.fixedDelay(maxRetries, retryDelay)
-                .filter(throwable -> !(throwable instanceof RuntimeException) || 
-                       !throwable.getMessage().startsWith("Address is blocked")));
+            .retry(maxRetries)
+            .delaySubscription(retryDelay);
     }
 
     @Override
     public Mono<Void> blockAddress(InetSocketAddress address, Duration duration) {
         return Mono.fromRunnable(() -> {
-            long unblockTime = System.currentTimeMillis() + duration.toMillis();
-            blockedAddresses.put(address, unblockTime);
-            statistics.incrementBlockedAddresses();
-        })
-        .subscribeOn(Schedulers.boundedElastic())
-        .then();
+            long expiryTime = System.currentTimeMillis() + duration.toMillis();
+            blockedAddresses.put(address, expiryTime);
+        });
     }
 
     @Override
     public Mono<Void> unblockAddress(InetSocketAddress address) {
         return Mono.fromRunnable(() -> {
-            if (blockedAddresses.remove(address) != null) {
-                statistics.decrementBlockedAddresses();
-            }
-        })
-        .subscribeOn(Schedulers.boundedElastic())
-        .then();
+            blockedAddresses.remove(address);
+        });
     }
 
     @Override
     public Mono<Boolean> isBlocked(InetSocketAddress address) {
         return Mono.fromCallable(() -> {
-            Long unblockTime = blockedAddresses.get(address);
-            if (unblockTime == null) {
+            Long expiryTime = blockedAddresses.get(address);
+            if (expiryTime == null) {
                 return false;
             }
             
-            if (System.currentTimeMillis() > unblockTime) {
+            if (System.currentTimeMillis() > expiryTime) {
                 blockedAddresses.remove(address);
-                statistics.decrementBlockedAddresses();
                 return false;
             }
             
             return true;
-        })
-        .subscribeOn(Schedulers.boundedElastic());
+        });
     }
 
     @Override
     public Mono<Void> start() {
-        return Mono.fromCallable(() -> {
+        return Mono.fromRunnable(() -> {
             if (isRunning.compareAndSet(false, true)) {
-                server = UdpServer.create()
+                serverConnection = UdpServer.create()
                     .host(bindAddress.getHostString())
                     .port(bindAddress.getPort())
                     .handle((inbound, outbound) -> {
@@ -153,7 +146,6 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
                     .subscribeOn(Schedulers.boundedElastic())
                     .subscribe(tick -> cleanupBlockedAddresses());
             }
-            return null;
         })
         .subscribeOn(Schedulers.boundedElastic())
         .then();
@@ -163,11 +155,12 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
     public Mono<Void> stop() {
         return Mono.fromRunnable(() -> {
             if (isRunning.compareAndSet(true, false)) {
-                if (server != null) {
-                    server.dispose();
+                if (serverConnection != null) {
+                    serverConnection.dispose();
                 }
                 if (client != null) {
-                    client.dispose();
+                    // UdpClient doesn't have dispose method, we'll handle lifecycle differently
+                    client = null;
                 }
                 inboundSink.tryEmitComplete();
             }
@@ -188,82 +181,63 @@ public class ReactiveUDPChannel implements ReactiveNetworkChannel {
 
     private void handleIncomingPacket(DatagramPacket packet) {
         try {
-            ByteBuf content = packet.content();
-            InetSocketAddress sender = packet.sender();
+            statistics.incrementPacketsReceived();
             
-            // Check if sender is blocked
-            if (isBlocked(sender).block(Duration.ofMillis(100))) {
+            // Check if address is blocked
+            if (isBlocked(packet.sender()).block()) {
                 statistics.incrementPacketsDropped();
                 return;
             }
             
-            // Create network packet
+            ByteBuf buffer = packet.content();
+            if (buffer.readableBytes() == 0) {
+                statistics.incrementPacketsDropped();
+                return;
+            }
+            
+            NetworkPacket.PacketType packetType = determinePacketType(buffer);
+            
             NetworkPacket networkPacket = new NetworkPacket(
-                content.retain(), 
-                determinePacketType(content)
+                buffer.copy(),
+                packetType,
+                sequenceNumber.getAndIncrement(),
+                System.currentTimeMillis()
             );
             
-            // Create packet event
             PacketEvent event = new PacketEvent(
-                networkPacket, 
-                sender, 
-                sequenceNumber.incrementAndGet()
+                networkPacket,
+                packet.sender(),
+                sequenceNumber.get()
             );
             
-            // Emit to reactive stream
             inboundSink.tryEmitNext(event);
-            
-            // Update statistics
-            statistics.incrementPacketsReceived();
-            statistics.addBytesReceived(content.readableBytes());
             
         } catch (Exception e) {
             statistics.incrementPacketsDropped();
-            // Log error but don't crash
-            System.err.println("Error handling incoming packet: " + e.getMessage());
         }
     }
 
     private NetworkPacket.PacketType determinePacketType(ByteBuf buffer) {
-        if (buffer.readableBytes() < 1) {
+        if (buffer.readableBytes() == 0) {
             return NetworkPacket.PacketType.UNKNOWN;
         }
         
-        byte firstByte = buffer.getByte(0);
+        byte firstByte = buffer.getByte(buffer.readerIndex());
         
-        // RakNet packet type determination based on first byte
-        switch (firstByte) {
-            case 0x01: return NetworkPacket.PacketType.RAKNET_PING;
-            case 0x03: return NetworkPacket.PacketType.RAKNET_PONG;
-            case 0x05: return NetworkPacket.PacketType.RAKNET_OPEN_CONNECTION_REQUEST_1;
-            case 0x06: return NetworkPacket.PacketType.RAKNET_OPEN_CONNECTION_REPLY_1;
-            case 0x07: return NetworkPacket.PacketType.RAKNET_OPEN_CONNECTION_REQUEST_2;
-            case 0x08: return NetworkPacket.PacketType.RAKNET_OPEN_CONNECTION_REPLY_2;
-            case 0x09: return NetworkPacket.PacketType.RAKNET_CONNECTION_REQUEST;
-            case 0x10: return NetworkPacket.PacketType.RAKNET_CONNECTION_REQUEST_ACCEPTED;
-            case 0x13: return NetworkPacket.PacketType.RAKNET_NEW_INCOMING_CONNECTION;
-            case 0x15: return NetworkPacket.PacketType.RAKNET_DISCONNECT_NOTIFICATION;
-            case 0x19: return NetworkPacket.PacketType.RAKNET_INCOMPATIBLE_PROTOCOL_VERSION;
-            case 0x1c: return NetworkPacket.PacketType.RAKNET_UNCONNECTED_PING;
-            case 0x1d: return NetworkPacket.PacketType.RAKNET_UNCONNECTED_PONG;
-            case (byte) 0xc0: return NetworkPacket.PacketType.RAKNET_ACK;
-            case (byte) 0xa0: return NetworkPacket.PacketType.RAKNET_NACK;
-            default:
-                if ((firstByte & 0x80) != 0) {
-                    return NetworkPacket.PacketType.RAKNET_DATA_PACKET;
-                }
-                return NetworkPacket.PacketType.UNKNOWN;
+        // RakNet packet type determination logic
+        if ((firstByte & 0x80) != 0) {
+            return NetworkPacket.PacketType.DATA;
+        } else if (firstByte == 0x01) {
+            return NetworkPacket.PacketType.PING;
+        } else if (firstByte == 0x1C) {
+            return NetworkPacket.PacketType.PONG;
+        } else {
+            return NetworkPacket.PacketType.CONTROL;
         }
     }
 
     private void cleanupBlockedAddresses() {
         long currentTime = System.currentTimeMillis();
-        blockedAddresses.entrySet().removeIf(entry -> {
-            if (currentTime > entry.getValue()) {
-                statistics.decrementBlockedAddresses();
-                return true;
-            }
-            return false;
-        });
+        blockedAddresses.entrySet().removeIf(entry -> entry.getValue() < currentTime);
     }
 }

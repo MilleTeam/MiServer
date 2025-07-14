@@ -8,24 +8,24 @@ import cn.nukkit.network.protocol.DataPacket;
 import cn.nukkit.network.protocol.ProtocolInfo;
 import cn.nukkit.raknet.reactive.core.NetworkPacket;
 import cn.nukkit.raknet.reactive.core.NetworkStatistics;
+import cn.nukkit.raknet.reactive.core.PacketEvent;
 import cn.nukkit.raknet.reactive.core.ReactiveUDPChannel;
 import cn.nukkit.raknet.reactive.server.ReactiveRakNetSessionManager;
 import cn.nukkit.raknet.reactive.server.ReactiveSessionManager;
 import cn.nukkit.raknet.reactive.server.ServerStatistics;
-import cn.nukkit.raknet.reactive.session.ReactiveSession;
 import cn.nukkit.utils.MainLogger;
 import io.netty.buffer.Unpooled;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Reactive RakNet interface implementation for Nukkit server integration.
+ * Reactive implementation of RakNet interface for Nukkit server
  */
 public class ReactiveRakNetInterface implements AdvancedSourceInterface {
 
@@ -37,7 +37,7 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
     private final Map<Integer, String> identifiers = new ConcurrentHashMap<>();
     private final Map<String, Integer> identifiersACK = new ConcurrentHashMap<>();
     private final MainLogger logger;
-    
+
     private Network network;
     private int[] channelCounts = new int[256];
     private boolean shutdown = false;
@@ -48,20 +48,15 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
         this.networkChannel = new ReactiveUDPChannel(host, port);
         this.sessionManager = new ReactiveRakNetSessionManager(networkChannel);
         
-        // Configure session manager
-        sessionManager.setServerName(server.getMotd());
-        sessionManager.setMaxPlayers(server.getMaxPlayers());
-        sessionManager.setSessionTimeout(Duration.ofSeconds(30));
-        
         // Subscribe to session events
         sessionManager.sessionEvents()
+            .subscribeOn(Schedulers.boundedElastic())
             .subscribe(this::handleSessionEvent);
         
         // Subscribe to incoming packets
-        sessionManager.inbound()
+        networkChannel.inbound()
+            .subscribeOn(Schedulers.boundedElastic())
             .subscribe(this::handleIncomingPacket);
-        
-        logger.info("Reactive RakNet interface initialized on " + host + ":" + port);
     }
 
     @Override
@@ -75,8 +70,10 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
             return false;
         }
         
-        // Process statistics and monitoring
-        processStatistics();
+        // Process session updates
+        sessionManager.processSessionUpdates()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
         
         // Check for query regeneration
         QueryRegenerateEvent queryEvent = server.getQueryInformation();
@@ -94,16 +91,15 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
             player.close(player.getLeaveMessage(), reason);
         }
         
-        networkLatency.remove(identifier);
-        identifiersACK.remove(identifier);
-        
-        // Remove session from reactive session manager
-        sessionManager.removeSession(identifier).subscribe();
+        // Remove from session manager
+        sessionManager.removeSession(identifier)
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
     }
 
     @Override
     public int getNetworkLatency(Player player) {
-        return networkLatency.getOrDefault(player.rawHashCode() + "", -1);
+        return networkLatency.getOrDefault(player.getAddress() + ":" + player.getPort(), -1);
     }
 
     @Override
@@ -113,10 +109,13 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
 
     @Override
     public void close(Player player, String reason) {
-        if (player != null) {
-            String identifier = player.rawHashCode() + "";
-            closeSession(identifier, reason);
-        }
+        String identifier = player.getAddress() + ":" + player.getPort();
+        players.remove(identifier);
+        networkLatency.remove(identifier);
+        
+        sessionManager.removeSession(identifier)
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
     }
 
     @Override
@@ -124,45 +123,55 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
         shutdown = true;
         
         // Shutdown session manager
-        sessionManager.stop().block(Duration.ofSeconds(10));
+        sessionManager.shutdown()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
         
-        // Disconnect all players
-        players.values().forEach(player -> {
-            player.close(player.getLeaveMessage(), "Server closed");
-        });
+        // Stop network channel
+        networkChannel.stop()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
         
+        // Clear all players
         players.clear();
         networkLatency.clear();
         identifiers.clear();
         identifiersACK.clear();
-        
-        logger.info("Reactive RakNet interface shutdown complete");
     }
 
     @Override
     public void emergencyShutdown() {
         shutdown = true;
-        sessionManager.stop().block(Duration.ofSeconds(5));
+        
+        // Emergency shutdown - force close everything
+        sessionManager.shutdown()
+            .timeout(Duration.ofSeconds(5))
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
+        
+        networkChannel.stop()
+            .timeout(Duration.ofSeconds(5))
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
+        
         players.clear();
         networkLatency.clear();
         identifiers.clear();
         identifiersACK.clear();
-        
-        logger.info("Reactive RakNet interface emergency shutdown complete");
     }
 
-    @Override
     public void openSession(String identifier, String address, int port, long clientID) {
         InetSocketAddress socketAddress = new InetSocketAddress(address, port);
         
-        // Create session in reactive session manager
-        sessionManager.createSession(socketAddress, clientID)
+        // Create session through session manager
+        sessionManager.createSession(identifier, socketAddress, clientID)
+            .subscribeOn(Schedulers.boundedElastic())
             .subscribe(
                 session -> {
                     identifiers.put((int) clientID, identifier);
                     
                     // Create player
-                    PlayerCreationEvent event = new PlayerCreationEvent(this, Player.class, Player.class, clientID, socketAddress);
+                    PlayerCreationEvent event = new PlayerCreationEvent(this, Player.class, Player.class, clientID, address, port);
                     server.getPluginManager().callEvent(event);
                     
                     Class<? extends Player> clazz = event.getPlayerClass();
@@ -173,49 +182,44 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
                         server.addPlayer(identifier, player);
                         
                         logger.info("Player " + address + ":" + port + " connected with session " + identifier);
-                    } catch (NoSuchMethodException | InstantiationException | IllegalAccessException | InvocationTargetException e) {
-                        logger.error("Failed to create player for session " + identifier, e);
+                    } catch (Exception e) {
+                        logger.error("Failed to create player for " + address + ":" + port, e);
                     }
                 },
-                error -> {
-                    logger.error("Failed to create session for " + address + ":" + port, error);
-                }
+                error -> logger.error("Failed to create session for " + address + ":" + port, error)
             );
     }
 
-    @Override
     public void handleEncapsulated(String identifier, cn.nukkit.raknet.protocol.EncapsulatedPacket packet, int flags) {
-        // This method is called by the old interface, but we handle packets differently in the reactive implementation
-        // Convert to reactive format if needed
-        if (packet != null && packet.buffer != null) {
-            NetworkPacket networkPacket = new NetworkPacket(
-                Unpooled.wrappedBuffer(packet.buffer),
-                NetworkPacket.PacketType.CUSTOM_PACKET
-            );
-            
-            // Find session and handle packet
-            sessionManager.getSession(identifier)
-                .flatMap(session -> session.send(networkPacket))
-                .subscribe(
-                    v -> {}, // Success
-                    error -> logger.error("Failed to handle encapsulated packet", error)
-                );
+        Player player = players.get(identifier);
+        if (player != null) {
+            try {
+                DataPacket dataPacket = getPacket(packet.buffer);
+                if (dataPacket != null) {
+                    player.handleDataPacket(dataPacket);
+                }
+            } catch (Exception e) {
+                logger.error("Error handling encapsulated packet from " + identifier, e);
+            }
         }
     }
 
     @Override
     public void blockAddress(String address) {
-        blockAddress(address, 300);
+        blockAddress(address, 300); // 5 minutes default
     }
 
     @Override
     public void blockAddress(String address, int timeout) {
         try {
             InetSocketAddress socketAddress = new InetSocketAddress(address, 0);
-            sessionManager.blockAddress(socketAddress, Duration.ofSeconds(timeout)).subscribe();
-            logger.info("Blocked address " + address + " for " + timeout + " seconds");
+            Duration duration = Duration.ofSeconds(timeout);
+            
+            networkChannel.blockAddress(socketAddress, duration)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
         } catch (Exception e) {
-            logger.error("Failed to block address " + address, e);
+            logger.error("Error blocking address " + address, e);
         }
     }
 
@@ -223,17 +227,31 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
     public void unblockAddress(String address) {
         try {
             InetSocketAddress socketAddress = new InetSocketAddress(address, 0);
-            sessionManager.unblockAddress(socketAddress).subscribe();
-            logger.info("Unblocked address " + address);
+            
+            networkChannel.unblockAddress(socketAddress)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
         } catch (Exception e) {
-            logger.error("Failed to unblock address " + address, e);
+            logger.error("Error unblocking address " + address, e);
         }
     }
 
-    @Override
     public void handleRaw(String address, int port, byte[] payload) {
-        // Raw packet handling is now done by the reactive session manager
-        // This method is kept for compatibility
+        // Handle raw packets
+        try {
+            InetSocketAddress socketAddress = new InetSocketAddress(address, port);
+            NetworkPacket packet = new NetworkPacket(
+                Unpooled.wrappedBuffer(payload),
+                NetworkPacket.PacketType.CONTROL,
+                0,
+                System.currentTimeMillis()
+            );
+            networkChannel.send(packet, socketAddress)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
+        } catch (Exception e) {
+            logger.error("Error handling raw packet", e);
+        }
     }
 
     @Override
@@ -242,51 +260,43 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
             InetSocketAddress socketAddress = new InetSocketAddress(address, port);
             NetworkPacket packet = new NetworkPacket(
                 Unpooled.wrappedBuffer(payload),
-                NetworkPacket.PacketType.CUSTOM_PACKET
+                NetworkPacket.PacketType.CONTROL,
+                0,
+                System.currentTimeMillis()
             );
-            
-            networkChannel.send(packet, socketAddress).subscribe();
+            networkChannel.send(packet, socketAddress)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
         } catch (Exception e) {
-            logger.error("Failed to send raw packet to " + address + ":" + port, e);
+            logger.error("Error sending raw packet", e);
         }
     }
 
-    @Override
     public void notifyACK(String identifier, int identifierACK) {
         identifiersACK.put(identifier, identifierACK);
     }
 
     @Override
     public void setName(String name) {
-        sessionManager.setServerName(name);
+        // Set server name for query response
+        server.getQueryInformation().setName(name);
     }
 
     public void setPortCheck(boolean value) {
-        // Port checking is handled by the reactive implementation
+        // Port check setting
     }
 
-    @Override
     public void handleOption(String name, String value) {
-        // Handle configuration options
+        // Handle server options
         switch (name.toLowerCase()) {
             case "name":
                 setName(value);
                 break;
-            case "maxplayers":
-                try {
-                    int maxPlayers = Integer.parseInt(value);
-                    sessionManager.setMaxPlayers(maxPlayers);
-                } catch (NumberFormatException e) {
-                    logger.warning("Invalid maxplayers value: " + value);
-                }
+            case "portcheck":
+                setPortCheck(Boolean.parseBoolean(value));
                 break;
-            case "timeout":
-                try {
-                    int timeout = Integer.parseInt(value);
-                    sessionManager.setSessionTimeout(Duration.ofSeconds(timeout));
-                } catch (NumberFormatException e) {
-                    logger.warning("Invalid timeout value: " + value);
-                }
+            default:
+                logger.debug("Unknown option: " + name + " = " + value);
                 break;
         }
     }
@@ -308,7 +318,17 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
         }
         
         try {
-            packet.protocol = ProtocolInfo.CURRENT_PROTOCOL;
+            // Set protocol version
+            if (packet instanceof cn.nukkit.network.protocol.DataPacket) {
+                // Access protocol field through reflection or cast if needed
+                try {
+                    java.lang.reflect.Field protocolField = packet.getClass().getField("protocol");
+                    protocolField.setInt(packet, ProtocolInfo.CURRENT_PROTOCOL);
+                } catch (Exception e) {
+                    // If reflection fails, ignore
+                }
+            }
+            
             packet.encode();
             
             byte[] buffer = packet.getBuffer();
@@ -318,14 +338,12 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
             
             NetworkPacket networkPacket = new NetworkPacket(
                 Unpooled.wrappedBuffer(buffer),
-                NetworkPacket.PacketType.CUSTOM_PACKET,
-                immediate ? 1 : 0,
-                needACK
+                NetworkPacket.PacketType.DATA,
+                0,
+                System.currentTimeMillis()
             );
             
-            String identifier = player.rawHashCode() + "";
-            
-            // Send packet through reactive session manager
+            String identifier = player.getAddress() + ":" + player.getPort();
             sessionManager.getSession(identifier)
                 .flatMap(session -> session.send(networkPacket, needACK, immediate ? 1 : 0))
                 .subscribe(
@@ -333,7 +351,7 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
                     error -> logger.error("Failed to send packet to player " + player.getName(), error)
                 );
             
-            return packet.pid();
+            return (int) packet.pid();
         } catch (Exception e) {
             logger.error("Error sending packet to player " + player.getName(), e);
             return null;
@@ -344,90 +362,87 @@ public class ReactiveRakNetInterface implements AdvancedSourceInterface {
      * Starts the reactive RakNet interface
      */
     public void start() {
-        sessionManager.start().block(Duration.ofSeconds(30));
-        logger.info("Reactive RakNet interface started");
+        networkChannel.start()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe();
     }
 
     /**
      * Gets network statistics
      */
     public Mono<NetworkStatistics> getNetworkStatistics() {
-        return sessionManager.getNetworkStatistics();
+        return networkChannel.getStatistics();
     }
 
     /**
      * Gets server statistics
      */
     public Mono<ServerStatistics> getServerStatistics() {
-        return sessionManager.getServerStatistics();
+        return sessionManager.getStatistics();
     }
 
     private void handleSessionEvent(ReactiveSessionManager.SessionEvent event) {
         switch (event.getType()) {
             case SESSION_CREATED:
-                logger.debug("Session created: " + event.getSession().getId());
+                logger.debug("Session created: " + event.getSessionId());
                 break;
-            case SESSION_CONNECTED:
-                logger.debug("Session connected: " + event.getSession().getId());
-                break;
-            case SESSION_DISCONNECTED:
-                logger.debug("Session disconnected: " + event.getSession().getId() + 
-                           (event.getReason() != null ? " (" + event.getReason() + ")" : ""));
+            case SESSION_CLOSED:
+                logger.debug("Session closed: " + event.getSessionId());
+                Player player = players.remove(event.getSessionId());
+                if (player != null) {
+                    server.removePlayer(player);
+                }
                 break;
             case SESSION_TIMEOUT:
-                logger.debug("Session timeout: " + event.getSession().getId());
+                logger.debug("Session timeout: " + event.getSessionId());
                 break;
         }
     }
 
     private void handleIncomingPacket(cn.nukkit.raknet.reactive.core.PacketEvent event) {
-        // Handle incoming packets from the reactive layer
         try {
             NetworkPacket packet = event.getPacket();
-            byte[] data = packet.getDataArray();
+            InetSocketAddress source = event.getSource();
             
-            if (data.length > 0) {
-                DataPacket dataPacket = getPacket(data);
-                if (dataPacket != null) {
-                    String identifier = event.getSender().getAddress().getHostAddress() + ":" + event.getSender().getPort();
-                    Player player = players.get(identifier);
-                    
-                    if (player != null) {
-                        dataPacket.setBuffer(data, 0);
-                        player.handleDataPacket(dataPacket);
-                    }
-                }
-            }
+            String identifier = source.getHostString() + ":" + source.getPort();
+            
+            // Process packet through session manager
+            sessionManager.handleIncomingPacket(identifier, packet)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(
+                    v -> {}, // Success
+                    error -> logger.error("Error processing packet from " + identifier, error)
+                );
         } catch (Exception e) {
             logger.error("Error handling incoming packet", e);
         }
     }
 
     private DataPacket getPacket(byte[] buffer) {
-        // Convert byte buffer to DataPacket
-        // This is a simplified version - in practice, you'd use the full packet factory
         try {
-            if (buffer.length > 0) {
-                DataPacket packet = network.getPacket(buffer[0]);
-                if (packet != null) {
-                    packet.setBuffer(buffer, 1);
-                    return packet;
-                }
+            if (buffer.length == 0) {
+                return null;
             }
+            
+            // Create appropriate DataPacket based on packet ID
+            byte packetId = buffer[0];
+            return network.getPacket(packetId);
         } catch (Exception e) {
             logger.error("Error creating packet from buffer", e);
+            return null;
         }
-        return null;
     }
 
     private void processStatistics() {
-        // Update network latency for players
-        players.forEach((identifier, player) -> {
-            sessionManager.getSession(identifier)
-                .flatMap(ReactiveSession::getStatistics)
-                .subscribe(stats -> {
-                    networkLatency.put(identifier, (int) stats.getRoundTripTime());
-                });
-        });
+        // Process and update statistics
+        getNetworkStatistics()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe(stats -> {
+                // Update network latency for players
+                for (Player player : players.values()) {
+                    String key = player.getAddress() + ":" + player.getPort();
+                    networkLatency.put(key, (int) stats.getAverageLatency());
+                }
+            });
     }
 }
